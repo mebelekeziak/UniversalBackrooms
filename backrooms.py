@@ -1,5 +1,5 @@
 import anthropic
-import openai
+from openai import OpenAI
 import json
 import datetime
 import os
@@ -8,6 +8,8 @@ import dotenv
 import sys
 import colorsys
 import requests
+from dataclasses import dataclass
+from typing import List, Optional
 
 # Attempt to load from .env file, but don't override existing env vars
 dotenv.load_dotenv(override=False)
@@ -24,13 +26,41 @@ MODEL_INFO = {
         "company": "anthropic",
     },
     "gpt4o": {
-        "api_name": "gpt-4o-2024-08-06",
-        "display_name": "GPT4o",
+        "api_name": "gpt-4o",
+        "display_name": "GPT-4o",
         "company": "openai",
     },
-    "o1-preview": {"api_name": "o1-preview", "display_name": "O1", "company": "openai"},
-    "o1-mini": {"api_name": "o1-mini", "display_name": "Mini", "company": "openai"},
+    "gpt5": {"api_name": "gpt-5", "display_name": "GPT-5", "company": "openai"},
+    "gpt5-mini": {
+        "api_name": "gpt-5-mini",
+        "display_name": "GPT-5 Mini",
+        "company": "openai",
+    },
 }
+
+REASONING_MODELS = {"gpt-5", "gpt-5-mini"}
+USE_OPENAI_RESPONSES = True
+
+
+@dataclass
+class ModelReply:
+    text: str
+    response_id: Optional[str] = None
+    reasoning_item_ids: Optional[List[str]] = None
+    encrypted_reasoning: Optional[List[str]] = None
+
+
+def _normalize_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(item) for item in content)
+    return str(content)
+
+
+def _content_block_for_role(role: str, text: str) -> dict:
+    content_type = "output_text" if role == "assistant" else "input_text"
+    return {"type": content_type, "text": text}
 
 
 def claude_conversation(actor, model, context, system_prompt=None):
@@ -46,25 +76,88 @@ def claude_conversation(actor, model, context, system_prompt=None):
     if system_prompt:
         kwargs["system"] = system_prompt
     message = anthropic_client.messages.create(**kwargs)
-    return message.content[0].text
+    content = message.content[0].text if message.content else ""
+    return ModelReply(text=content)
 
 
-def gpt4_conversation(actor, model, context, system_prompt=None):
-    messages = [{"role": m["role"], "content": m["content"]} for m in context]
+def openai_conversation(
+    actor,
+    model,
+    context,
+    system_prompt=None,
+    *,
+    include_encrypted_reasoning=False,
+    reasoning_effort=None,
+    max_output_tokens=1024,
+):
+    input_items = []
 
-    kwargs = {
+    if system_prompt:
+        input_items.append(
+            {
+                "role": "system",
+                "content": [_content_block_for_role("system", system_prompt)],
+            }
+        )
+
+    for message in context:
+        normalized_content = _normalize_content(message["content"])
+        input_items.append(
+            {
+                "role": message["role"],
+                "content": [
+                    _content_block_for_role(message["role"], normalized_content)
+                ],
+            }
+        )
+
+    if not input_items:
+        input_items.append(
+            {
+                "role": "user",
+                "content": [_content_block_for_role("user", "")],
+            }
+        )
+
+    create_params = {
         "model": model,
-        "messages": messages,
+        "input": input_items,
         "temperature": 1.0,
+        "max_output_tokens": max_output_tokens,
     }
 
-    if model == "o1-preview" or model == "o1-mini":
-        kwargs["max_tokens"] = 4000
-    else:
-        kwargs["max_tokens"] = 1024
+    include_items = []
+    is_reasoning_model = model in REASONING_MODELS
 
-    response = openai_client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content
+    if include_encrypted_reasoning and is_reasoning_model:
+        include_items.append("reasoning.encrypted_content")
+        create_params["store"] = False
+
+    if reasoning_effort and is_reasoning_model:
+        create_params["reasoning"] = {"effort": reasoning_effort}
+
+    if include_items:
+        create_params["include"] = include_items
+
+    response = openai_client.responses.create(**create_params)
+    text = (response.output_text or "").strip()
+
+    reasoning_ids: List[str] = []
+    encrypted_reasoning: List[str] = []
+
+    for item in getattr(response, "output", []):
+        if getattr(item, "type", None) == "reasoning":
+            reasoning_ids.append(item.id)
+            encrypted_blob = getattr(item, "encrypted_content", None)
+            if encrypted_blob:
+                encrypted_reasoning.append(encrypted_blob)
+
+    return ModelReply(
+        text=text,
+        response_id=response.id,
+        reasoning_item_ids=reasoning_ids or None,
+        encrypted_reasoning=encrypted_reasoning or None,
+    )
 
 
 def load_template(template_name, models):
@@ -98,7 +191,8 @@ def load_template(template_name, models):
                 )
 
             if (
-                models[i] in MODEL_INFO
+                not USE_OPENAI_RESPONSES
+                and models[i] in MODEL_INFO
                 and MODEL_INFO[models[i]]["company"] == "openai"
                 and config["system_prompt"]
             ):
@@ -144,7 +238,7 @@ def main():
     )
     parser.add_argument(
         "--lm",
-        choices=["sonnet", "opus", "gpt4o", "o1-preview", "o1-mini", "cli"],
+        choices=["sonnet", "opus", "gpt4o", "gpt5", "gpt5-mini", "cli"],
         nargs="+",
         default=["opus", "opus"],
         help="Choose the models for LMs or 'cli' for the world interface (default: opus opus)",
@@ -160,8 +254,25 @@ def main():
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=float("inf"),
+        default=float("10"),
         help="Maximum number of turns in the conversation (default: infinity)",
+    )
+    parser.add_argument(
+        "--include-encrypted-reasoning",
+        action="store_true",
+        help="Request encrypted reasoning traces for GPT-5 family models (Responses API only).",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Set the reasoning effort hint for GPT-5 family models (default: medium).",
+    )
+    parser.add_argument(
+        "--openai-max-output-tokens",
+        type=int,
+        default=2048,
+        help="Maximum tokens to request from OpenAI models via the Responses API (default: 2048).",
     )
     args = parser.parse_args()
 
@@ -215,9 +326,15 @@ def main():
                 "Error: OPENAI_API_KEY must be set in the environment or in a .env file."
             )
             sys.exit(1)
-        openai_client = openai.OpenAI(api_key=openai_api_key)
+        openai_client = OpenAI(api_key=openai_api_key)
 
     configs = load_template(args.template, models)
+
+    openai_settings = {
+        "include_encrypted_reasoning": args.include_encrypted_reasoning,
+        "reasoning_effort": args.reasoning_effort,
+        "max_output_tokens": args.openai_max_output_tokens,
+    }
 
     assert len(models) == len(
         configs
@@ -225,7 +342,6 @@ def main():
 
     system_prompts = [config.get("system_prompt", "") for config in configs]
     contexts = [config.get("context", []) for config in configs]
-
     logs_folder = "BackroomsLogs"
     if not os.path.exists(logs_folder):
         os.makedirs(logs_folder)
@@ -244,6 +360,7 @@ def main():
                     lm_display_names[i],
                     contexts[i],
                     system_prompts[i],
+                    openai_settings=openai_settings,
                 )
             process_and_log_response(
                 lm_response,
@@ -261,14 +378,23 @@ def main():
         )
 
 
-def generate_model_response(model, actor, context, system_prompt):
+def generate_model_response(model, actor, context, system_prompt, openai_settings=None):
     if model.startswith("claude-"):
         return claude_conversation(
             actor, model, context, system_prompt if system_prompt else None
         )
     else:
-        return gpt4_conversation(
-            actor, model, context, system_prompt if system_prompt else None
+        settings = openai_settings or {}
+        return openai_conversation(
+            actor,
+            model,
+            context,
+            system_prompt if system_prompt else None,
+            include_encrypted_reasoning=settings.get(
+                "include_encrypted_reasoning", False
+            ),
+            reasoning_effort=settings.get("reasoning_effort"),
+            max_output_tokens=settings.get("max_output_tokens", 2048),
         )
 
 
@@ -290,7 +416,7 @@ def get_ansi_color(rgb):
     return f"\033[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
 
 
-def process_and_log_response(response, actor, filename, contexts, current_model_index):
+def process_and_log_response(reply, actor, filename, contexts, current_model_index):
     global actor_colors
 
     # Get or generate a color for this actor
@@ -306,13 +432,21 @@ def process_and_log_response(response, actor, filename, contexts, current_model_
     file_header = f"\n### {actor} ###\n"
 
     print(console_header)
-    print(response)
+    print(reply.text)
 
     with open(filename, "a") as f:
         f.write(file_header)
-        f.write(response + "\n")
+        f.write(reply.text + "\n")
+        if reply.encrypted_reasoning:
+            f.write("### Encrypted Reasoning Payloads ###\n")
+            for idx, blob in enumerate(reply.encrypted_reasoning, start=1):
+                f.write(f"[{idx}] {blob}\n")
+            f.write("\n")
 
-    if "^C^C" in response:
+    if reply.encrypted_reasoning:
+        print("  [Encrypted reasoning captured; see log for payloads]")
+
+    if "^C^C" in reply.text:
         end_message = f"\n{actor} has ended the conversation with ^C^C."
         print(end_message)
         with open(filename, "a") as f:
@@ -322,7 +456,7 @@ def process_and_log_response(response, actor, filename, contexts, current_model_
     # Add the response to all contexts
     for i, context in enumerate(contexts):
         role = "assistant" if i == current_model_index else "user"
-        context.append({"role": role, "content": response})
+        context.append({"role": role, "content": reply.text})
 
 
 def cli_conversation(context):
@@ -343,7 +477,7 @@ def cli_conversation(context):
     response.raise_for_status()
     response_data = response.json()
     cli_response = response_data["choices"][0]["message"]["content"]
-    return cli_response
+    return ModelReply(text=cli_response)
 
 
 if __name__ == "__main__":

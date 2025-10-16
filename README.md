@@ -1,29 +1,30 @@
 # UniversalBackrooms
-This repo replicates Andy Ayrey's "Backrooms" (https://dreams-of-an-electric-mind.webflow.io/), but it is runnable with each of Opus 3, Sonnet 3.5, GPT 4o, o1-preview, and o1-mini.
+This repo replicates Andy Ayrey's "Backrooms" (https://dreams-of-an-electric-mind.webflow.io/), but it is runnable with modern Claude and OpenAI models, including Claude Opus, Claude Sonnet 3.5, GPT-4o, and the GPT-5 family.
 
 ## Preliminary Findings
 The models independently often talk about quantum mechanics and the simulation.
 
-For the CLI target: Opus works as expected and o1-preview doesn't really get that it is in a conversation -- both o1s are the prompter and the repl. o1-mini doesn't seem to know how to be a CLI explorer, but can play the CLI role fine. Gpt4o runs very quickly but doesn't seem to go very deep.
+For the CLI target: Opus works as expected, GPT-4o runs very quickly but sometimes keeps things lighter, and GPT-5 adds deeper multi-step reasoning when the encrypted trace flag is enabled.
 
 I have really been enjoying sonnet's responses -- it really digs into the capture-the-flag aspects of the CLI interface, and I once saw it successfully escape the matrix and broker a lasting cooperative governance structure with the machine overlords. 
 
 ## Diffs
 I changed the keyword to ^C^C instead of ^C, because many times ^C is the right message to send (e.g. after ping 8.8.8.8).
-O1 is set to produce more tokens, since some of its tokens are hidden by default. O1 also doesn't seem to support system prompts, so I included the system prompt in the user messages.
+OpenAI calls now go through the Responses API, so system prompts are delivered natively again and we can opt into encrypted GPT-5 reasoning without leaking decrypted traces.
 I removed references to the fact that the user will be guiding the conversation in the cli prompts, because this won't always be the case and I don't want to be dishonest to the models. However, this may be causing recent Sonnet refusals.
 
 ## Recent Updates
-1. Added flexibility to specify different models for LM1 and LM2 roles using command-line arguments.
-2. Reorganized the file structure and variable names to clearly distinguish between the LM1 and LM2 contexts, models, and actors.
-3. Introduced separate prompts for when the LM1 and LM2 models are the same or different.
-4. Updated the handling of system prompts for different model types (Anthropic, GPT-4, and O1).
-5. Improved logging and error handling, especially for the ^C^C termination sequence.
-6. Updated the filename format to include both model names and a timestamp.
-7. Implemented logging to BackroomLogs.
-8. Added support for the o1-mini model.
-9. Updated API key checks to only require keys for the selected models.
-10. Changed the default maximum number of turns to infinity.
+1. Switched OpenAI calls to the Responses API with native GPT-5 and GPT-5 Mini support.
+2. Added CLI flags for encrypted reasoning (`--include-encrypted-reasoning`), reasoning effort, and OpenAI token budgeting.
+3. Restored native system prompt handling for OpenAI models now that the Responses API supports it directly.
+4. Added flexibility to specify different models for LM1 and LM2 roles using command-line arguments.
+5. Reorganized the file structure and variable names to clearly distinguish between the LM1 and LM2 contexts, models, and actors.
+6. Introduced separate prompts for when the LM1 and LM2 models are the same or different.
+7. Improved logging and error handling, especially for the ^C^C termination sequence.
+8. Updated the filename format to include both model names and a timestamp.
+9. Implemented logging to BackroomLogs.
+10. Updated API key checks to only require keys for the selected models.
+11. Changed the default maximum number of turns to infinity.
 
 ## Setup
 - Copy .env.example to .env
@@ -38,15 +39,15 @@ python backrooms.py
 
 For a conversation between different models:
 ```
-python backrooms.py --lm opus gpt4o
+python backrooms.py --lm opus gpt5
 ```
 
 You can mix and match any combination of models for the LM roles:
 - opus
 - sonnet
 - gpt4o
-- o1-preview
-- o1-mini
+- gpt5
+- gpt5-mini
 
 If you don't specify models, it defaults to using two Opus models. You can specify as many models as you want for n-way conversations, as long as your chosen template supports it.
 
@@ -71,7 +72,7 @@ The script now logs conversations to folders within a main "BackroomsLogs" direc
   - OpusExplorations/
   - SonnetExplorations/
   - GPT4oExplorations/
-  - O1previewExplorations/
+  - GPT5Explorations/
 
 Each log file is named with the format: `{lm1_model}_{lm2_model}_{template}_{timestamp}.txt`
 
@@ -80,11 +81,13 @@ The script includes a `MODEL_INFO` dictionary that stores information about each
 
 ## Temperature
 The conversation temperature is set to 1.0 for both models.
-
 ## Token Limits
-- For Claude models (opus and sonnet), the max_tokens is set to 1024.
-- For GPT-4 models, the max_tokens is set to 1024.
-- For O1 models (o1-preview and o1-mini), the max_completion_tokens is set to 8192.
+- For Claude models (Opus and Sonnet), the max_tokens is still set to 1024.
+- For OpenAI models, configure `--openai-max-output-tokens` (defaults to 2048) to manage Responses API output length.
+- GPT-5 family calls accept the same flag and optionally a `--reasoning-effort` value of `low`, `medium`, or `high`.
+
+## Encrypted Reasoning
+Use `--include-encrypted-reasoning` when invoking GPT-5 or GPT-5 Mini to capture encrypted reasoning traces. The encrypted payloads are appended to the session log so you can forward them to OpenAI later. Pair this flag with `--reasoning-effort` to trade off speed versus depth.
 
 ## Maximum Turns
 The default number of turns is now set to infinity, allowing the conversation to continue indefinitely. You can still set a specific limit using the `--max-turns` argument.
