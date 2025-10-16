@@ -131,7 +131,7 @@ def openai_conversation(
 
     if include_encrypted_reasoning and is_reasoning_model:
         include_items.append("reasoning.encrypted_content")
-        create_params["store"] = False
+        create_params["store"] = True
 
     if reasoning_effort and is_reasoning_model:
         create_params["reasoning"] = {"effort": reasoning_effort}
@@ -271,7 +271,7 @@ def main():
     parser.add_argument(
         "--openai-max-output-tokens",
         type=int,
-        default=2048,
+        default=14048,
         help="Maximum tokens to request from OpenAI models via the Responses API (default: 2048).",
     )
     args = parser.parse_args()
@@ -438,13 +438,10 @@ def process_and_log_response(reply, actor, filename, contexts, current_model_ind
         f.write(file_header)
         f.write(reply.text + "\n")
         if reply.encrypted_reasoning:
-            f.write("### Encrypted Reasoning Payloads ###\n")
-            for idx, blob in enumerate(reply.encrypted_reasoning, start=1):
-                f.write(f"[{idx}] {blob}\n")
-            f.write("\n")
+            f.write("[Encrypted reasoning payload captured]\n")
 
     if reply.encrypted_reasoning:
-        print("  [Encrypted reasoning captured; see log for payloads]")
+        print("  [Encrypted reasoning captured for internal use]")
 
     if "^C^C" in reply.text:
         end_message = f"\n{actor} has ended the conversation with ^C^C."
