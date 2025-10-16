@@ -41,6 +41,9 @@ MODEL_INFO = {
 REASONING_MODELS = {"gpt-5", "gpt-5-mini"}
 USE_OPENAI_RESPONSES = True
 
+LOG_FILE_ENCODING = "utf-8"
+LOG_FILE_ERROR_MODE = "replace"
+
 
 @dataclass
 class ModelReply:
@@ -162,7 +165,12 @@ def openai_conversation(
 
 def load_template(template_name, models):
     try:
-        with open(f"templates/{template_name}.jsonl", "r") as f:
+        with open(
+            f"templates/{template_name}.jsonl",
+            "r",
+            encoding=LOG_FILE_ENCODING,
+            errors=LOG_FILE_ERROR_MODE,
+        ) as f:
             configs = [json.loads(line) for line in f]
 
         companies = []
@@ -343,8 +351,7 @@ def main():
     system_prompts = [config.get("system_prompt", "") for config in configs]
     contexts = [config.get("context", []) for config in configs]
     logs_folder = "BackroomsLogs"
-    if not os.path.exists(logs_folder):
-        os.makedirs(logs_folder)
+    os.makedirs(logs_folder, exist_ok=True)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{logs_folder}/{'_'.join(models)}_{args.template}_{timestamp}.txt"
@@ -372,10 +379,10 @@ def main():
         turn += 1
 
     print(f"\nReached maximum number of turns ({args.max_turns}). Conversation ended.")
-    with open(filename, "a") as f:
-        f.write(
-            f"\nReached maximum number of turns ({args.max_turns}). Conversation ended.\n"
-        )
+    append_to_log(
+        filename,
+        f"\nReached maximum number of turns ({args.max_turns}). Conversation ended.\n",
+    )
 
 
 def generate_model_response(model, actor, context, system_prompt, openai_settings=None):
@@ -416,8 +423,28 @@ def get_ansi_color(rgb):
     return f"\033[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
 
 
+def append_to_log(filename: str, *segments):
+    """Write segments to the log file using a stable encoding."""
+    try:
+        with open(
+            filename,
+            "a",
+            encoding=LOG_FILE_ENCODING,
+            errors=LOG_FILE_ERROR_MODE,
+            newline="",
+        ) as f:
+            for segment in segments:
+                f.write("" if segment is None else str(segment))
+    except OSError as exc:
+        print(f"Warning: Unable to write to log '{filename}': {exc}", file=sys.stderr)
+
+
 def process_and_log_response(reply, actor, filename, contexts, current_model_index):
     global actor_colors
+
+    text = reply.text
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
 
     # Get or generate a color for this actor
     if actor not in actor_colors:
@@ -432,28 +459,25 @@ def process_and_log_response(reply, actor, filename, contexts, current_model_ind
     file_header = f"\n### {actor} ###\n"
 
     print(console_header)
-    print(reply.text)
+    print(text)
 
-    with open(filename, "a") as f:
-        f.write(file_header)
-        f.write(reply.text + "\n")
-        if reply.encrypted_reasoning:
-            f.write("[Encrypted reasoning payload captured]\n")
+    append_to_log(filename, file_header, text, "\n")
+    if reply.encrypted_reasoning:
+        append_to_log(filename, "[Encrypted reasoning payload captured]\n")
 
     if reply.encrypted_reasoning:
         print("  [Encrypted reasoning captured for internal use]")
 
-    if "^C^C" in reply.text:
+    if "^C^C" in text:
         end_message = f"\n{actor} has ended the conversation with ^C^C."
         print(end_message)
-        with open(filename, "a") as f:
-            f.write(end_message + "\n")
+        append_to_log(filename, end_message, "\n")
         exit()
 
     # Add the response to all contexts
     for i, context in enumerate(contexts):
         role = "assistant" if i == current_model_index else "user"
-        context.append({"role": role, "content": reply.text})
+        context.append({"role": role, "content": text})
 
 
 def cli_conversation(context):
