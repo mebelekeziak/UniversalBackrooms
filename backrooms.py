@@ -33,7 +33,7 @@ MODEL_INFO = {
     "gpt5": {"api_name": "gpt-5", "display_name": "GPT-5", "company": "openai"},
     "gpt5-mini": {
         "api_name": "gpt-5-mini",
-        "display_name": "GPT-5 Mini",
+        "display_name": "GP5-T-5 Mini",
         "company": "openai",
     },
 }
@@ -462,12 +462,6 @@ def process_and_log_response(reply, actor, filename, contexts, current_model_ind
     print(text)
 
     append_to_log(filename, file_header, text, "\n")
-    if reply.encrypted_reasoning:
-        append_to_log(filename, "[Encrypted reasoning payload captured]\n")
-
-    if reply.encrypted_reasoning:
-        print("  [Encrypted reasoning captured for internal use]")
-
     if "^C^C" in text:
         end_message = f"\n{actor} has ended the conversation with ^C^C."
         print(end_message)
