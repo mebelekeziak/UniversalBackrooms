@@ -3,7 +3,6 @@ from openai import OpenAI
 import json
 import datetime
 import os
-import argparse
 import dotenv
 import sys
 import colorsys
@@ -194,7 +193,7 @@ def openai_conversation(
     )
 
 
-def load_template(template_name, models):
+def load_template(template_name, models, actor_labels=None):
     try:
         with open(
             f"templates/{template_name}.jsonl",
@@ -209,10 +208,16 @@ def load_template(template_name, models):
         for i, model in enumerate(models):
             if model.lower() == "cli":
                 companies.append("CLI")
-                actors.append("CLI")
+                if actor_labels and i < len(actor_labels):
+                    actors.append(actor_labels[i])
+                else:
+                    actors.append("CLI")
             else:
                 companies.append(MODEL_INFO[model]["company"])
-                actors.append(f"{MODEL_INFO[model]['display_name']} {i+1}")
+                if actor_labels and i < len(actor_labels):
+                    actors.append(actor_labels[i])
+                else:
+                    actors.append(f"{MODEL_INFO[model]['display_name']} {i+1}")
 
         for i, config in enumerate(configs):
             if models[i].lower() == "cli":
@@ -269,74 +274,205 @@ def get_available_templates():
     return templates
 
 
+def _prompt_menu(prompt: str, options, default_value=None):
+    """Prompt the user to select from a numbered list."""
+    value_by_key = {}
+    default_label = None
+    for index, (value, label) in enumerate(options, start=1):
+        value_by_key[str(index)] = value
+        value_by_key[value.lower()] = value
+        if value == default_value:
+            default_label = label
+
+    while True:
+        print()
+        print(prompt)
+        for index, (_, label) in enumerate(options, start=1):
+            marker = " (default)" if options[index - 1][0] == default_value else ""
+            print(f"  {index}. {label}{marker}")
+
+        hint = f"[{default_label}]" if default_label else ""
+        selection = input(f"Select an option {hint}: ").strip()
+        if not selection:
+            if default_value is not None:
+                return default_value
+            print("Please enter a choice.")
+            continue
+
+        key = selection.lower()
+        if key in value_by_key:
+            return value_by_key[key]
+
+        print("Invalid selection. Enter the number or key shown in the list.")
+
+
+def _prompt_int(prompt: str, default_value=None, minimum=None):
+    """Prompt the user for an integer with optional default and minimum."""
+    while True:
+        suffix = f" [{default_value}]" if default_value is not None else ""
+        raw = input(f"{prompt}{suffix}: ").strip()
+        if not raw:
+            if default_value is not None:
+                return default_value
+            print("Please enter a value.")
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+
+        if minimum is not None and value < minimum:
+            print(f"Value must be at least {minimum}.")
+            continue
+
+        return value
+
+
+def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    """Prompt for yes/no and return a boolean."""
+    hint = "Y/n" if default else "y/N"
+    while True:
+        raw = input(f"{prompt} [{hint}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("Please answer with 'y' or 'n'.")
+
+
+def run_interactive_builder():
+    if not sys.stdin.isatty():
+        print("Interactive setup requires a TTY. Please run this script from a terminal.")
+        sys.exit(1)
+
+    print("=== Universal Backrooms Setup ===")
+    model_options = []
+    for key, info in MODEL_INFO.items():
+        label = f"{info['display_name']} ({key}) - {info['company'].capitalize()}"
+        model_options.append((key, label))
+    model_options.append(("cli", "CLI Interface (cli)"))
+
+    selections = []
+    for idx, suffix in enumerate(["A", "B"], start=1):
+        default_model = "opus"
+        if default_model not in [value for value, _ in model_options]:
+            default_model = model_options[0][0]
+        model_key = _prompt_menu(
+            f"Select model {suffix}", model_options, default_value=default_model
+        )
+
+        if model_key == "cli":
+            actor_name = f"CLI {suffix}"
+        else:
+            display_name = MODEL_INFO[model_key]["display_name"]
+            actor_name = f"{display_name} {suffix}"
+
+        selections.append({"key": model_key, "actor": actor_name})
+
+    available_templates = get_available_templates()
+    if not available_templates:
+        print("No templates found in ./templates. Please add a template before running.")
+        sys.exit(1)
+    template_choices = [(name, name) for name in available_templates]
+    template = _prompt_menu(
+        "Choose a conversation template",
+        template_choices,
+        default_value=available_templates[0] if available_templates else None,
+    )
+
+    max_turns_input = _prompt_int(
+        "Maximum number of turns (0 for unlimited)", default_value=10, minimum=0
+    )
+    max_turns = None if max_turns_input == 0 else max_turns_input
+
+    selected_model_keys = [item["key"] for item in selections]
+    selected_api_models = [
+        MODEL_INFO[key]["api_name"]
+        for key in selected_model_keys
+        if key in MODEL_INFO
+    ]
+
+    any_openai = any(
+        key in MODEL_INFO and MODEL_INFO[key]["company"] == "openai"
+        for key in selected_model_keys
+    )
+    has_reasoning_models = any(api in REASONING_MODELS for api in selected_api_models)
+
+    include_encrypted_reasoning = False
+    reasoning_effort = "medium"
+    openai_max_output_tokens = 14048
+
+    if any_openai:
+        openai_max_output_tokens = _prompt_int(
+            "Max OpenAI output tokens", default_value=14048, minimum=1
+        )
+
+    if has_reasoning_models:
+        include_encrypted_reasoning = _prompt_yes_no(
+            "Request encrypted reasoning traces for GPT-5 family models?",
+            default=False,
+        )
+        reasoning_effort = _prompt_menu(
+            "Reasoning effort for GPT-5 family models",
+            [("low", "Low"), ("medium", "Medium"), ("high", "High")],
+            default_value="medium",
+        )
+        print(
+            "\nDisclaimer: OpenAI only returns reasoning summaries for verified organisations."
+            " If your organisation is unverified you will not receive reasoning summaries, but encrypted reasoning is still available."
+        )
+
+    print("\nSetup complete. Starting conversation...\n")
+
+    return {
+        "models": selected_model_keys,
+        "actor_labels": [item["actor"] for item in selections],
+        "template": template,
+        "max_turns": max_turns,
+        "include_encrypted_reasoning": include_encrypted_reasoning,
+        "reasoning_effort": reasoning_effort,
+        "openai_max_output_tokens": openai_max_output_tokens,
+    }
+
+
 def main():
     global anthropic_client
     global openai_client
-    parser = argparse.ArgumentParser(
-        description="Run conversation between two or more AI language models."
-    )
-    parser.add_argument(
-        "--lm",
-        choices=["sonnet", "opus", "gpt4o", "gpt5", "gpt5-mini", "cli"],
-        nargs="+",
-        default=["opus", "opus"],
-        help="Choose the models for LMs or 'cli' for the world interface (default: opus opus)",
-    )
+    try:
+        builder_config = run_interactive_builder()
+    except (KeyboardInterrupt, EOFError):
+        print("\nSetup cancelled.")
+        return
 
-    available_templates = get_available_templates()
-    parser.add_argument(
-        "--template",
-        choices=available_templates,
-        default="cli" if "cli" in available_templates else available_templates[0],
-        help=f"Choose a conversation template (available: {', '.join(available_templates)})",
-    )
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=float("10"),
-        help="Maximum number of turns in the conversation (default: infinity)",
-    )
-    parser.add_argument(
-        "--include-encrypted-reasoning",
-        action="store_true",
-        help="Request encrypted reasoning traces for GPT-5 family models (Responses API only).",
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        choices=["low", "medium", "high"],
-        default="medium",
-        help="Set the reasoning effort hint for GPT-5 family models (default: medium).",
-    )
-    parser.add_argument(
-        "--openai-max-output-tokens",
-        type=int,
-        default=14048,
-        help="Maximum tokens to request from OpenAI models via the Responses API (default: 2048).",
-    )
-    args = parser.parse_args()
+    models = builder_config["models"]
+    actor_labels = builder_config["actor_labels"]
+    template_name = builder_config["template"]
+    max_turns = builder_config["max_turns"]
+    include_encrypted_reasoning = builder_config["include_encrypted_reasoning"]
+    reasoning_effort = builder_config["reasoning_effort"]
+    openai_max_output_tokens = builder_config["openai_max_output_tokens"]
 
-    models = args.lm
     lm_models = []
     lm_display_names = []
-
     companies = []
-    actors = []
 
-    for i, model in enumerate(models):
-        if model.lower() == "cli":
-            lm_display_names.append("CLI")
+    for index, model_key in enumerate(models):
+        actor_label = actor_labels[index] if index < len(actor_labels) else ""
+        if model_key.lower() == "cli":
             lm_models.append("cli")
             companies.append("CLI")
-            actors.append("CLI")
+            lm_display_names.append(actor_label or "CLI")
         else:
-            if model in MODEL_INFO:
-                lm_display_names.append(f"{MODEL_INFO[model]['display_name']} {i+1}")
-                lm_models.append(MODEL_INFO[model]["api_name"])
-                companies.append(MODEL_INFO[model]["company"])
-                actors.append(f"{MODEL_INFO[model]['display_name']} {i+1}")
-            else:
-                print(f"Error: Model '{model}' not found in MODEL_INFO.")
+            info = MODEL_INFO.get(model_key)
+            if not info:
+                print(f"Error: Model '{model_key}' not found in MODEL_INFO.")
                 sys.exit(1)
+            lm_models.append(info["api_name"])
+            companies.append(info["company"])
+            lm_display_names.append(actor_label or f"{info['display_name']} {index + 1}")
 
     # Filter out models not in MODEL_INFO (like 'cli')
     anthropic_models = [
@@ -367,12 +503,12 @@ def main():
             sys.exit(1)
         openai_client = OpenAI(api_key=openai_api_key)
 
-    configs = load_template(args.template, models)
+    configs = load_template(template_name, models, actor_labels)
 
     openai_settings = {
-        "include_encrypted_reasoning": args.include_encrypted_reasoning,
-        "reasoning_effort": args.reasoning_effort,
-        "max_output_tokens": args.openai_max_output_tokens,
+        "include_encrypted_reasoning": include_encrypted_reasoning,
+        "reasoning_effort": reasoning_effort,
+        "max_output_tokens": openai_max_output_tokens,
     }
 
     assert len(models) == len(
@@ -385,10 +521,10 @@ def main():
     os.makedirs(logs_folder, exist_ok=True)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{logs_folder}/{'_'.join(models)}_{args.template}_{timestamp}.txt"
+    filename = f"{logs_folder}/{'_'.join(models)}_{template_name}_{timestamp}.txt"
 
     turn = 0
-    while turn < args.max_turns:
+    while max_turns is None or turn < max_turns:
         for i in range(len(models)):
             if models[i].lower() == "cli":
                 lm_response = cli_conversation(contexts[i])
@@ -409,11 +545,12 @@ def main():
             )
         turn += 1
 
-    print(f"\nReached maximum number of turns ({args.max_turns}). Conversation ended.")
-    append_to_log(
-        filename,
-        f"\nReached maximum number of turns ({args.max_turns}). Conversation ended.\n",
-    )
+    if max_turns is not None:
+        print(f"\nReached maximum number of turns ({max_turns}). Conversation ended.")
+        append_to_log(
+            filename,
+            f"\nReached maximum number of turns ({max_turns}). Conversation ended.\n",
+        )
 
 
 def generate_model_response(model, actor, context, system_prompt, openai_settings=None):
