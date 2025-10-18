@@ -29,16 +29,27 @@ MODEL_INFO = {
         "api_name": "gpt-4o",
         "display_name": "GPT-4o",
         "company": "openai",
+        "is_reasoning": False,
     },
-    "gpt5": {"api_name": "gpt-5", "display_name": "GPT-5", "company": "openai"},
+    "gpt5": {
+        "api_name": "gpt-5",
+        "display_name": "GPT-5",
+        "company": "openai",
+        "is_reasoning": True,
+    },
     "gpt5-mini": {
         "api_name": "gpt-5-mini",
         "display_name": "GP5-T-5 Mini",
         "company": "openai",
+        "is_reasoning": True,
     },
 }
 
-REASONING_MODELS = {"gpt-5", "gpt-5-mini"}
+REASONING_MODELS = {
+    info["api_name"]
+    for info in MODEL_INFO.values()
+    if info.get("company") == "openai" and info.get("is_reasoning", False)
+}
 USE_OPENAI_RESPONSES = True
 
 LOG_FILE_ENCODING = "utf-8"
@@ -51,6 +62,7 @@ class ModelReply:
     response_id: Optional[str] = None
     reasoning_item_ids: Optional[List[str]] = None
     encrypted_reasoning: Optional[List[str]] = None
+    reasoning_summary: Optional[str] = None
 
 
 def _normalize_content(content) -> str:
@@ -131,13 +143,20 @@ def openai_conversation(
 
     include_items = []
     is_reasoning_model = model in REASONING_MODELS
+    reasoning_settings = {}
 
     if include_encrypted_reasoning and is_reasoning_model:
         include_items.append("reasoning.encrypted_content")
         create_params["store"] = True
 
     if reasoning_effort and is_reasoning_model:
-        create_params["reasoning"] = {"effort": reasoning_effort}
+        reasoning_settings["effort"] = reasoning_effort
+
+    if is_reasoning_model:
+        reasoning_settings["summary"] = "auto"
+
+    if reasoning_settings:
+        create_params["reasoning"] = reasoning_settings
 
     if include_items:
         create_params["include"] = include_items
@@ -147,6 +166,7 @@ def openai_conversation(
 
     reasoning_ids: List[str] = []
     encrypted_reasoning: List[str] = []
+    reasoning_summary: Optional[str] = None
 
     for item in getattr(response, "output", []):
         if getattr(item, "type", None) == "reasoning":
@@ -155,11 +175,22 @@ def openai_conversation(
             if encrypted_blob:
                 encrypted_reasoning.append(encrypted_blob)
 
+    reasoning_metadata = getattr(response, "reasoning", None)
+    if reasoning_metadata:
+        if isinstance(reasoning_metadata, dict):
+            reasoning_summary = reasoning_metadata.get("summary")
+        else:
+            reasoning_summary = getattr(reasoning_metadata, "summary", None)
+
+    if isinstance(reasoning_summary, str):
+        reasoning_summary = reasoning_summary.strip() or None
+
     return ModelReply(
         text=text,
         response_id=response.id,
         reasoning_item_ids=reasoning_ids or None,
         encrypted_reasoning=encrypted_reasoning or None,
+        reasoning_summary=reasoning_summary,
     )
 
 
@@ -462,6 +493,13 @@ def process_and_log_response(reply, actor, filename, contexts, current_model_ind
     print(text)
 
     append_to_log(filename, file_header, text, "\n")
+    if reply.reasoning_summary:
+        append_to_log(
+            filename,
+            "\n--- Reasoning Summary (logs only) ---\n",
+            reply.reasoning_summary,
+            "\n",
+        )
     if "^C^C" in text:
         end_message = f"\n{actor} has ended the conversation with ^C^C."
         print(end_message)
