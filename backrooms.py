@@ -24,21 +24,21 @@ MODEL_INFO = {
         "display_name": "Claude",
         "company": "anthropic",
     },
-    "gpt4o": {
+    "gpt-4o": {
         "api_name": "gpt-4o",
         "display_name": "GPT-4o",
         "company": "openai",
         "is_reasoning": False,
     },
-    "gpt5": {
+    "gpt-5": {
         "api_name": "gpt-5",
         "display_name": "GPT-5",
         "company": "openai",
         "is_reasoning": True,
     },
-    "gpt5-mini": {
+    "gpt-5-mini": {
         "api_name": "gpt-5-mini",
-        "display_name": "GP5-T-5 Mini",
+        "display_name": "GP5-5 Mini",
         "company": "openai",
         "is_reasoning": True,
     },
@@ -53,6 +53,9 @@ USE_OPENAI_RESPONSES = True
 
 LOG_FILE_ENCODING = "utf-8"
 LOG_FILE_ERROR_MODE = "replace"
+
+ANSI_RESET = "\033[0m"
+ANSI_BLUE = "\033[94m"
 
 
 @dataclass
@@ -274,36 +277,153 @@ def get_available_templates():
     return templates
 
 
+def _enable_windows_ansi():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        # If enabling ANSI escapes fails we silently continue; menus still work albeit without color.
+        pass
+
+
+def _supports_color():
+    if os.getenv("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _colorize(text: str, color: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def _clear_lines(count: int):
+    if count <= 0 or not sys.stdout.isatty():
+        return
+    for _ in range(count):
+        sys.stdout.write("\033[F\033[K")
+    sys.stdout.flush()
+
+
+def _read_nav_key():
+    if os.name == "nt":
+        import msvcrt
+
+        while True:
+            ch = msvcrt.getwch()
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            if ch in (" ",):
+                return "ENTER"
+            lower = ch.lower()
+            if lower == "w":
+                return "UP"
+            if lower == "s":
+                return "DOWN"
+            if lower == "a":
+                return "LEFT"
+            if lower == "d":
+                return "RIGHT"
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                mapping = {"H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT"}
+                mapped = mapping.get(ch2.upper())
+                if mapped:
+                    return mapped
+            # Ignore other keys and continue the loop
+    else:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\r", "\n", " "):
+                    return "ENTER"
+                lower = ch.lower()
+                if lower == "w":
+                    return "UP"
+                if lower == "s":
+                    return "DOWN"
+                if lower == "a":
+                    return "LEFT"
+                if lower == "d":
+                    return "RIGHT"
+                if ch == "\x1b":
+                    second = sys.stdin.read(1)
+                    if second in ("[", "O"):
+                        third = sys.stdin.read(1)
+                        mapping = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
+                        mapped = mapping.get(third.upper())
+                        if mapped:
+                            return mapped
+                # Ignore anything else
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _render_menu(prompt: str, options, current_index: int, default_value):
+    lines = [
+        "",
+        prompt,
+        "Use ↑/↓ arrows or W/S to move; press Enter to select.",
+    ]
+    for idx, (value, label) in enumerate(options):
+        marker = ">" if idx == current_index else " "
+        suffix = " (default)" if default_value is not None and value == default_value else ""
+        text = f"{label}{suffix}"
+        if idx == current_index:
+            text = _colorize(text, ANSI_BLUE)
+        lines.append(f" {marker} {text}")
+
+    output = "\n".join(lines)
+    print(output, flush=True)
+    return len(lines)
+
+
 def _prompt_menu(prompt: str, options, default_value=None):
-    """Prompt the user to select from a numbered list."""
-    value_by_key = {}
-    default_label = None
-    for index, (value, label) in enumerate(options, start=1):
-        value_by_key[str(index)] = value
-        value_by_key[value.lower()] = value
-        if value == default_value:
-            default_label = label
+    """Prompt the user to select from an interactive list using arrow or WASD keys."""
+    if not options:
+        raise ValueError("No options provided for selection.")
+
+    option_values = [value for value, _ in options]
+    current_index = 0
+    if default_value is not None and default_value in option_values:
+        current_index = option_values.index(default_value)
 
     while True:
-        print()
-        print(prompt)
-        for index, (_, label) in enumerate(options, start=1):
-            marker = " (default)" if options[index - 1][0] == default_value else ""
-            print(f"  {index}. {label}{marker}")
+        lines_rendered = _render_menu(prompt, options, current_index, default_value)
+        key = _read_nav_key()
 
-        hint = f"[{default_label}]" if default_label else ""
-        selection = input(f"Select an option {hint}: ").strip()
-        if not selection:
-            if default_value is not None:
-                return default_value
-            print("Please enter a choice.")
+        if key in {"UP", "LEFT"}:
+            _clear_lines(lines_rendered)
+            current_index = (current_index - 1) % len(options)
             continue
+        if key in {"DOWN", "RIGHT"}:
+            _clear_lines(lines_rendered)
+            current_index = (current_index + 1) % len(options)
+            continue
+        if key == "ENTER":
+            print()
+            return option_values[current_index]
 
-        key = selection.lower()
-        if key in value_by_key:
-            return value_by_key[key]
-
-        print("Invalid selection. Enter the number or key shown in the list.")
+        # Unhandled keys simply re-render the menu
+        _clear_lines(lines_rendered)
 
 
 def _prompt_int(prompt: str, default_value=None, minimum=None):
@@ -330,23 +450,19 @@ def _prompt_int(prompt: str, default_value=None, minimum=None):
 
 
 def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
-    """Prompt for yes/no and return a boolean."""
-    hint = "Y/n" if default else "y/N"
-    while True:
-        raw = input(f"{prompt} [{hint}]: ").strip().lower()
-        if not raw:
-            return default
-        if raw in {"y", "yes"}:
-            return True
-        if raw in {"n", "no"}:
-            return False
-        print("Please answer with 'y' or 'n'.")
+    """Prompt for yes/no using the interactive menu."""
+    options = [("yes", "Yes"), ("no", "No")]
+    default_value = "yes" if default else "no"
+    selection = _prompt_menu(prompt, options, default_value=default_value)
+    return selection == "yes"
 
 
 def run_interactive_builder():
     if not sys.stdin.isatty():
         print("Interactive setup requires a TTY. Please run this script from a terminal.")
         sys.exit(1)
+
+    _enable_windows_ansi()
 
     print("=== Universal Backrooms Setup ===")
     model_options = []
